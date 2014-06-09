@@ -1,0 +1,251 @@
+#!/bin/bash
+#set -xv
+
+#setterm -mgs off
+
+ntpdate 62.233.33.1
+echo "nameserver 62.233.32.133" > /etc/resolv.conf
+
+#Détection du type de contrôlleur
+if [ -d '/dev/cciss' ] ; then
+CONTROLLER='/dev/cciss/c0d0'
+else
+CONTROLLER='/dev/sda'
+fi
+clear
+echo -e "\033[1mPreparation du systeme\033[0m"
+echo -n " |_ Suppresion des LV => "
+checkok=0
+lvscan |awk -F\' '{print $2}' | while read i ; do 
+lvremove -f $i || checkok=1
+done
+
+(( checkok=0 )) && echo -e "\e[1;92mOK" || echo "FAILED"
+tput sgr0
+echo -n " |_ Suppresion des VG => "
+vgscan | grep 'Found volume group' | awk -F\" '{print $2}' | while read i
+do vgremove -f $i
+done
+echo -e "\e[1;92mOK"
+tput sgr0
+echo -n " |_ Supression des PV => "
+pvscan | grep PV | awk '{print $2}' | while read i ; do
+pvremove -ff -y $i
+done
+echo -e "\e[1;92mOK"
+echo ""
+tput sgr0
+echo -e "\033[1mPreparation du disque\033[0m"
+echo -n " |_ Creation de la table des partitions => "
+# Création du fichier template contenant le schéma de partitionnement
+cat > /tmp/table_partition_fdisk << EOF
+o
+n
+p
+1
+
++256M
+t
+83
+a
+1
+n
+e
+2
+
+
+n
+l
+
+
+t
+5
+8e
+w
+EOF
+
+# Création de la table de partition
+fdisk $CONTROLLER < /tmp/table_partition_fdisk
+sleep 1
+echo -e "\e[1;92mOK"
+tput sgr0
+echo " |_"
+# Formatage des partitions, tunning des système de fichiers et montage
+echo " | \_ Formatage des partitions"
+if [ "$CONTROLLER" = '/dev/cciss/c0d0' ] ; then
+echo -n " |   |_ Formatage /boot    => "
+mkfs.ext2 /dev/cciss/c0d0p1
+tune2fs -c0 -m0 -u0 /dev/cciss/c0d0p1
+echo -e "\e[1;92mOK"
+tput sgr0
+pvcreate /dev/cciss/c0d0p5
+vgcreate vg /dev/cciss/c0d0p5
+echo -n " |   |_ Activation du SWAP => "
+lvcreate vg -n swap -L 2G 
+mkswap /dev/vg/swap
+swapon /dev/vg/swap
+echo -e "\e[1;92mOK"
+tput sgr0
+echo -n " |   |_ Formatage /        => "
+lvcreate vg -n root -L 5G
+mkfs.ext4 /dev/vg/root
+tune2fs -c0 -m0 -u0 /dev/vg/root
+echo -e "\e[1;92mOK"
+tput sgr0
+echo " |"
+echo -n " |_ Montage des partitions => "
+mkdir /target
+mount /dev/vg/root /target
+mkdir /target/boot
+mount /dev/cciss/c0d0p1 /target/boot
+echo -e "\e[1;92mOK"
+tput sgr0
+else
+echo -n " |   |_ Formatage /boot    => "
+mkfs.ext2 /dev/sda1
+tune2fs -c0 -m0 -u0 /dev/sda1
+echo -e "\e[1;92mOK"
+tput sgr0
+pvcreate /dev/sda5
+vgcreate vg /dev/sda5
+
+echo -n " |   |_ Activation du SWAP => "
+lvcreate vg -n swap -L 2G
+mkswap /dev/vg/swap
+swapon /dev/vg/swap
+echo -e "\e[1;92mOK"
+tput sgr0
+echo -n " |   |_ Formatage /        => "
+lvcreate vg -n root -L 5G
+mkfs.ext4 /dev/vg/root 
+tune2fs -c0 -m0 -u0 /dev/vg/root
+echo -e "\e[1;92mOK"
+tput sgr0
+echo " |"
+echo -n " |_ Montage des partitions => "
+mkdir /target
+mount /dev/vg/root /target
+mkdir /target/boot
+mount /dev/sda1 /target/boot
+echo -e "\e[1;92mOK"
+tput sgr0
+fi
+
+echo ""
+if [ "$(uname -m)" = 'x86_64' ] ; then
+	echo -en "\033[1mInstallation du systeme de base (64bit) => \033[0m"
+	wget -q http://az-mirror.azuria.net/wheezy-amd64.tar.gz -O - | tar --preserve-permissions --preserve-order -xz -C /target
+	echo -e "\e[1;92mOK"
+	echo ""
+	tput sgr0
+else
+	echo -en "\033[1mInstallation du systeme de base (32bit) => \033[0m"
+	wget -q  http://az-mirror.azuria.net/squeeze-i386.tar.gz -O - | tar --preserve-permissions --preserve-order -xz -C /target
+	echo -e "\e[1;92mOK"
+	echo ""
+	tput sgr0
+fi
+echo -e "\033[1mFinalisation de l'installation:\033[0m"
+# Remontage des répertoires nécessairs pour le chroot
+echo -n " |_ Montage de /dev /proc /sys    => "
+mount --bind /dev /target/dev
+mount --bind /dev/pts /target/dev/pts
+mount --bind /proc /target/proc
+mount --bind /sys /target/sys
+
+cp /etc/mtab /target/etc/mtab
+echo -e "\e[1;92mOK"
+tput sgr0
+# Définition de la liste des partition
+echo -n " |_ Definition du fstab           => "
+cat > /target/etc/fstab << EOF
+# /etc/fstab: static file system information.
+#
+# Use 'vol_id --uuid' to print the universally unique identifier for a
+# device; this may be used with UUID= as a more robust way to name devices
+# that works even if disks are added and removed. See fstab(5).
+#
+# <file system>	<mount point>	<type>	<options>			<dump>	<pass>
+proc		/proc		proc	defaults			0	0
+EOF
+
+if [ "$CONTROLLER" = "/dev/cciss/c0d0" ] ; then
+cat >> /target/etc/fstab << EOF
+/dev/cciss/c0d0p1		/boot		ext2	noatime,errors=remount-ro	0	0
+/dev/mapper/vg-swap	none		swap	sw				0	0
+/dev/mapper/vg-root	/		ext4	noatime,errors=remount-ro	0	0
+EOF
+echo -e "\e[1;92mOK"
+tput sgr0
+else
+cat >> /target/etc/fstab << EOF
+/dev/sda1	/boot		ext2	noatime,errors=remount-ro	0	0
+/dev/mapper/vg-swap	none		swap	sw				0	0
+/dev/mapper/vg-root	/		ext4	noatime,errors=remount-ro	0	0
+EOF
+echo -e "\e[1;92mOK"
+tput sgr0
+fi
+
+
+echo -n " |_ Definition des resolveurs DNS => " 
+# Définition des résolveurs DNS
+cat > /target/etc/resolv.conf << EOF
+domain azuria-servers.net
+search azuria-servers.net
+nameserver 62.233.32.133
+nameserver 80.65.235.38
+EOF
+echo -e "\e[1;92mOK"
+tput sgr0
+echo -n " |_ Mise a jour du systeme        => "
+# Évite le problème du fopen
+chroot /target chown -R man:root /var/cache/man
+chroot /target apt-get update
+chroot /target apt-get dist-upgrade -y
+chroot /target apt-get install ssh -y
+echo -e "\e[1;92mOK"
+tput sgr0
+echo -n " |_ Installation de GRUB          => "
+
+if [ "$CONTROLLER" = "/dev/cciss/c0d0" ] ; then
+
+	chroot /target/ grub-mkdevicemap
+	chroot /target/ grub-install --recheck /dev/cciss/c0d0 --root-directory=/ --force
+else
+	chroot /target/ grub-mkdevicemap
+        chroot /target/ grub-install --recheck /dev/sda --root-directory=/ --force
+fi
+chroot /target/ update-grub
+echo -e "\e[1;92mOK"
+tput sgr0
+if dmidecode | grep -i vmware ; 
+then
+echo -n " |_ Installation des VmTools      => "
+wget -q http://az-mirror.azuria.net/vmwaretools.tar.gz -O - | tar xz -C /target/root
+cd /target/root/vmware-tools-distrib
+./vmware-install.pl --default
+echo -e "\e[1;92mOK"
+tput sgr0
+fi
+
+echo "Configuration du serveur"
+
+mount -o bind /proc /target/proc
+mount -o bind /sys  /target/sys
+mount -o bind /dev  /target/dev
+
+chroot /target/ /usr/bin/azconfig.sh
+
+hostname=`cat /target/etc/hostname`
+bash -c 'curl -s -L -F "userfile=@/target/tmp/mail;type=application/octet-stream;" http://hell.azuria.net/up.php?hostname='$hostname
+
+rm /target/tmp/mail
+
+umount  /target/proc /target/sys /target/dev /target
+
+echo
+echo "Appuyez sur ENTER pour redemarrer, ou tappez CTRL+C pour quitter : "
+echo "ATTENTION ne pas oublier de faire la config du switch"
+read
+reboot
